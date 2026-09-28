@@ -178,9 +178,10 @@ class MainWindow(QMainWindow):
         h_layout.addWidget(self.latency_lbl)
         layout.addLayout(h_layout)
 
-        # Поле вывода перевода
+        # Поле вывода перевода (только для чтения)
         self.translation_box = QTextEdit(self)
         self.translation_box.setProperty("class", "translation-box")
+        self.translation_box.setReadOnly(True)
         self.translation_box.setPlaceholderText("Здесь появится связный перевод жестовой фразы...")
         layout.addWidget(self.translation_box)
 
