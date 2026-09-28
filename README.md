@@ -39,7 +39,7 @@ CV-project-RSL/
 ├── hand_landmarker.task        # Предобученная модель Google MediaPipe Hands
 ├── yolov8n-pose.pt             # Предобученная модель YOLOv8-pose
 ├── train.py                    # Определение архитектуры и цикл обучения/валидации
-├── test.py                     # Скрипт извлечения признаков из видео в тензоры
+├── extract_features.py         # Скрипт извлечения признаков из видео в тензоры
 ├── requirements.txt            # Зависимости проекта
 └── README.md                   # Документация проекта
 ```
@@ -84,7 +84,7 @@ print(f"Модель успешно загружена! Количество к�
 
 ### Извлечение признаков
 ```bash
-python test.py
+python extract_features.py
 ```
 *(Скрипт читает видеофайлы, сопоставляет с `annotations.csv` и сохраняет `.npy` тензоры в `hybrid_tensors/`)*.
 
