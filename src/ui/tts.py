@@ -43,10 +43,11 @@ class TextToSpeechEngine:
                 else:
                     # Windows PowerShell System.Speech fallback
                     import subprocess
+                    clean_text = text.replace("'", "").replace('"', '')
                     ps_cmd = (
                         f"Add-Type -AssemblyName System.Speech; "
                         f"$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                        f"$synth.Speak('{text.replace(\"'\", \"\")}')"
+                        f"$synth.Speak('{clean_text}')"
                     )
                     subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=False)
             except Exception as e:
