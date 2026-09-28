@@ -1,0 +1,30 @@
+# Datasets & extracted features
+hybrid_tensors/
+*.npy
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Training artifacts & logs
+runs/
+*.log
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
