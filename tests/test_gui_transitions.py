@@ -123,3 +123,58 @@ def test_full_navigation_tree_transitions(qapp):
 
     # Закрытие окна
     window.close()
+
+
+def test_patch_v1_2_features(qapp):
+    """
+    Тестирование ключевых изменений Patch v1.2:
+    1. Отсутствие NameError (QPen, QBrush, QPainter) при рендере скелета буквы.
+    2. Чистый режим Duolingo-дерева в разделе предложений.
+    3. Категоризация, Live Search и сетка карточек в каталоге динамических жестов.
+    """
+    config = AppConfig()
+    window = MainWindow(config=config)
+    nav = window.navigator
+
+    # 1. Проверка отсутствия NameError в letter_card_view
+    letter_scr = nav.get_screen("letter_card")
+    letter_scr.on_enter(letter="А")
+    letter_scr.preview_widget.repaint()
+
+    # 2. Проверка раздела предложений (SentenceLevelsScreen)
+    levels_scr = nav.get_screen("sentence_levels")
+    levels_scr.on_enter()
+    assert levels_scr.stack.currentWidget() == levels_scr.tree_page
+    levels = levels_scr.db.get_levels()
+    assert len(levels) >= 3
+
+    # 3. Проверка каталога динамических жестов
+    assert nav.get_screen("gesture_catalog") == nav.get_screen("word_catalog")
+    catalog = nav.get_screen("word_catalog")
+    assert len(catalog.all_words) in (965, 966)
+    assert "top_50" in catalog.categories_map
+    assert len(catalog.categories_map["top_50"]) == 50
+
+    # Фильтр по категории "Еда и напитки"
+    catalog._on_category_selected("food")
+    assert catalog.selected_category == "food"
+    assert len(catalog.filtered_words) == len(catalog.categories_map["food"])
+
+    # Живой поиск (Live Search)
+    catalog._on_search_changed("чай")
+    assert catalog.search_query == "чай"
+    assert all("чай" in w.lower() for w in catalog.filtered_words)
+
+    # Буквенный рубрикатор
+    catalog._on_search_changed("")
+    catalog._on_category_selected("all")
+    catalog._on_rubric_selected("В")
+    assert catalog.selected_letter == "В"
+    assert all(w.lower().startswith("в") for w in catalog.filtered_words)
+
+    # Сброс рубрикатора
+    catalog._on_rubric_selected(None)
+    assert catalog.selected_letter is None
+
+    window.close()
+

@@ -128,7 +128,9 @@ class MainWindow(QMainWindow):
 
         # Ветка Б: Динамические жесты
         nav.register_screen("dynamic_menu", DynamicMenuScreen(nav))
-        nav.register_screen("word_catalog", WordCatalogScreen(nav, self.db))
+        catalog_scr = WordCatalogScreen(nav, self.db)
+        nav.register_screen("word_catalog", catalog_scr)
+        nav.register_screen("gesture_catalog", catalog_scr)
         gesture_card_scr = GestureCardViewScreen(nav)
         nav.register_screen("gesture_card", gesture_card_scr)
         nav.register_screen("gesture_card_view", gesture_card_scr)

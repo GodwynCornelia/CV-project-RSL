@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont, QPainter
+from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,

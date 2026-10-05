@@ -12,6 +12,7 @@ from .sentence_levels import SentenceLevelsScreen
 from .settings_modal import SettingsScreen, SettingsScreen as SettingsModalScreen
 from .test_config import TestConfigScreen
 from .word_catalog import WordCatalogScreen
+from .gesture_catalog import GestureCatalogScreen
 
 __all__ = [
     "MainMenuScreen",
@@ -28,6 +29,7 @@ __all__ = [
     "ExamCameraScreen",
     "DynamicMenuScreen",
     "WordCatalogScreen",
+    "GestureCatalogScreen",
     "GestureCardViewScreen",
     "GestureTrainerScreen",
     "SentenceLevelsScreen"
