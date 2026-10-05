@@ -1,11 +1,16 @@
 from collections import deque
+import json
+from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QCompleter,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -26,11 +31,10 @@ from rsl_trainer.ui.components.video_canvas import VideoCanvas
 class SentenceLevelsScreen(QWidget):
     """
     Экран Б6. Режим «Предложения / Уровни» (по схеме).
-    - Интерактивное дерево уровней Duolingo со звездами и замками
-    - Механика пошаговой сборки фразы (Guided Composition):
-      Задание: [Я] -> [ХОТЕТЬ] -> [ВОДА]
-      Последовательная валидация каждого звена фразы
-    - Начисление XP (+50 XP), обновление Streak и открытие следующих уровней
+    Реализует трехуровневую модель доступа:
+    1. Сюжетные уровни (Duolingo) на основе rsl_trainer/data/curriculum.json
+    2. Конструктор фраз (Free Phrase Builder) с поиском по 966 классам (QCompleter)
+    3. Пошаговый интерактивный тренажер (Guided Composition: [Я] -> [ХОТЕТЬ] -> [ВОДА])
     """
 
     def __init__(self, navigator, camera_worker: CameraWorker, db: DatabaseManager, parent=None):
@@ -43,8 +47,15 @@ class SentenceLevelsScreen(QWidget):
         self.verifier: Optional[TargetGestureVerifier] = None
         self.ghost_renderer = GhostOverlayRenderer()
 
-        # Текущий уровень и фраза
-        self.current_level_data: Optional[Dict] = None
+        # Данные учебного плана и словаря
+        self.curriculum_data = self._load_curriculum()
+        self.all_vocabulary = self._load_vocabulary()
+
+        # Состояние конструктора фраз
+        self.custom_phrase: List[str] = []
+
+        # Текущая тренируемая фраза
+        self.current_title = "УРОВЕНЬ"
         self.current_phrase: List[str] = []
         self.step_idx = 0
         self.frame_buffer = deque(maxlen=16)
@@ -58,23 +69,48 @@ class SentenceLevelsScreen(QWidget):
 
         self._build_ui()
 
+    def _load_curriculum(self) -> Dict:
+        """Загрузка curriculum.json."""
+        curr_path = Path(__file__).resolve().parent.parent.parent / "data" / "curriculum.json"
+        if curr_path.exists():
+            try:
+                with open(curr_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"tracks": []}
+
+    def _load_vocabulary(self) -> List[str]:
+        """Загрузка 966 классов жестов для автодополнения QCompleter."""
+        label_file = Path(__file__).resolve().parent.parent.parent.parent / "label2id.json"
+        if label_file.exists():
+            try:
+                with open(label_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    vocab = [w for w in data.keys() if w != "no_event"]
+                    vocab.sort()
+                    return vocab
+            except Exception:
+                pass
+        return ["я", "хотеть", "вода", "Привет!", "Добро пожаловать!", "дом", "друг", "любить", "время", "день", "хорошо"]
+
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
         self.stack = QStackedWidget(self)
 
-        # 1. Дерево уровней (Карта)
-        self.tree_page = QWidget(self)
-        self._build_tree_page(self.tree_page)
-        self.stack.addWidget(self.tree_page)
+        # Страница 1: Главный хаб (Сюжетные уровни + Конструктор фраз)
+        self.hub_page = QWidget(self)
+        self._build_hub_page(self.hub_page)
+        self.stack.addWidget(self.hub_page)
 
-        # 2. Интерактивная сборка фразы
+        # Страница 2: Интерактивная сборка фразы
         self.trainer_page = QWidget(self)
         self._build_trainer_page(self.trainer_page)
         self.stack.addWidget(self.trainer_page)
 
-        # 3. Финальный экран поздравления
+        # Страница 3: Финальный экран поздравления
         self.complete_page = QWidget(self)
         self._build_complete_page(self.complete_page)
         self.stack.addWidget(self.complete_page)
@@ -82,21 +118,21 @@ class SentenceLevelsScreen(QWidget):
         main_layout.addWidget(self.stack)
 
     # -------------------------------------------------------------
-    # СТРАНИЦА 1: КАРТА УРОВНЕЙ DUOLINGO
+    # СТРАНИЦА 1: ХАБ РАЗДЕЛА «ПРЕДЛОЖЕНИЯ»
     # -------------------------------------------------------------
-    def _build_tree_page(self, page: QWidget) -> None:
+    def _build_hub_page(self, page: QWidget) -> None:
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 20, 32, 24)
-        layout.setSpacing(18)
+        layout.setSpacing(16)
 
-        # Верхняя панель
+        # 1. Верхняя панель
         header = QHBoxLayout()
         btn_back = QPushButton("← В меню жестов", page)
         btn_back.setProperty("class", "secondary-btn")
         btn_back.clicked.connect(self.navigator.pop_screen)
         header.addWidget(btn_back)
 
-        title = QLabel("КУРС РЖЯ: ДЕРЕВО УРОВНЕЙ", page)
+        title = QLabel("КУРС И ПРЕДЛОЖЕНИЯ РЖЯ", page)
         title.setStyleSheet("font-size: 18px; font-weight: 800; color: #10b981;")
         header.addWidget(title)
         header.addStretch()
@@ -109,9 +145,71 @@ class SentenceLevelsScreen(QWidget):
         header.addWidget(self.user_stats_lbl)
         layout.addLayout(header)
 
-        # Прокручиваемый список уровней
-        scroll = QScrollArea(page)
+        # 2. Переключатель режимов: Сюжетные уровни / Конструктор фраз
+        tab_box = QFrame(page)
+        tab_box.setStyleSheet(
+            "background-color: #131b2e; border: 1px solid #1e293b; border-radius: 12px; padding: 4px;"
+        )
+        tab_layout = QHBoxLayout(tab_box)
+        tab_layout.setContentsMargins(4, 4, 4, 4)
+        tab_layout.setSpacing(8)
+
+        self.mode_group = QButtonGroup(page)
+        self.mode_group.setExclusive(True)
+
+        self.btn_mode_story = QPushButton("🗺️ Сюжетные уровни (Duolingo)", tab_box)
+        self.btn_mode_story.setCheckable(True)
+        self.btn_mode_story.setChecked(True)
+        self.btn_mode_story.setProperty("class", "primary-btn")
+        self.btn_mode_story.clicked.connect(lambda: self._switch_hub_view(0))
+        self.mode_group.addButton(self.btn_mode_story)
+        tab_layout.addWidget(self.btn_mode_story)
+
+        self.btn_mode_builder = QPushButton("🛠️ Конструктор фраз (966 жестов)", tab_box)
+        self.btn_mode_builder.setCheckable(True)
+        self.btn_mode_builder.setProperty("class", "secondary-btn")
+        self.btn_mode_builder.clicked.connect(lambda: self._switch_hub_view(1))
+        self.mode_group.addButton(self.btn_mode_builder)
+        tab_layout.addWidget(self.btn_mode_builder)
+
+        layout.addWidget(tab_box)
+
+        # 3. Контейнер режимов (QStackedWidget)
+        self.hub_stack = QStackedWidget(page)
+
+        # Вью 0: Дерево уровней Duolingo
+        self.tree_view = QWidget()
+        self._build_story_tree_view(self.tree_view)
+        self.hub_stack.addWidget(self.tree_view)
+
+        # Вью 1: Конструктор фраз с поиском QCompleter
+        self.builder_view = QWidget()
+        self._build_phrase_builder_view(self.builder_view)
+        self.hub_stack.addWidget(self.builder_view)
+
+        layout.addWidget(self.hub_stack, stretch=1)
+
+    def _switch_hub_view(self, idx: int) -> None:
+        self.hub_stack.setCurrentIndex(idx)
+        if idx == 0:
+            self.btn_mode_story.setProperty("class", "primary-btn")
+            self.btn_mode_builder.setProperty("class", "secondary-btn")
+        else:
+            self.btn_mode_story.setProperty("class", "secondary-btn")
+            self.btn_mode_builder.setProperty("class", "primary-btn")
+        self.btn_mode_story.style().unpolish(self.btn_mode_story)
+        self.btn_mode_story.style().polish(self.btn_mode_story)
+        self.btn_mode_builder.style().unpolish(self.btn_mode_builder)
+        self.btn_mode_builder.style().polish(self.btn_mode_builder)
+
+    # --- Подстраница 1: Дерево сюжетных уровней ---
+    def _build_story_tree_view(self, parent_widget: QWidget) -> None:
+        layout = QVBoxLayout(parent_widget)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        scroll = QScrollArea(parent_widget)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background: transparent; border: none;")
 
         self.levels_container = QWidget()
@@ -121,103 +219,310 @@ class SentenceLevelsScreen(QWidget):
         self.levels_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         scroll.setWidget(self.levels_container)
-        layout.addWidget(scroll, stretch=1)
+        layout.addWidget(scroll)
 
     def _refresh_levels_tree(self) -> None:
-        # Обновляем статы
         stats = self.db.get_user_stats()
         self.user_stats_lbl.setText(f"🔥 {stats['streak_days']} ДНЕЙ  |  ⚡ {stats['total_xp']} XP")
 
-        # Очищаем карточки уровней
         while self.levels_layout.count():
             item = self.levels_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
 
-        levels = self.db.get_levels()
-        for idx, lvl in enumerate(levels):
-            card = self._create_level_node(lvl, idx)
-            self.levels_layout.addWidget(card)
+        tracks = self.curriculum_data.get("tracks", [])
+        if not tracks:
+            # Фаллбэк из базы данных
+            levels = self.db.get_levels()
+            for idx, lvl in enumerate(levels):
+                card = self._create_db_level_node(lvl, idx)
+                self.levels_layout.addWidget(card)
+            self.levels_layout.addStretch()
+            return
 
-            if idx < len(levels) - 1:
-                # Соединительная линия между узлами дерева
+        for t_idx, track in enumerate(tracks):
+            track_card = self._create_track_node(track, t_idx)
+            self.levels_layout.addWidget(track_card)
+
+            if t_idx < len(tracks) - 1:
                 line = QFrame(self.levels_container)
                 line.setFixedWidth(4)
-                line.setFixedHeight(24)
-                line_color = "#10b981" if lvl["stars"] > 0 else "#334155"
-                line.setStyleSheet(f"background-color: {line_color}; border-radius: 2px;")
+                line.setFixedHeight(20)
+                line.setStyleSheet("background-color: #10b981; border-radius: 2px;")
                 self.levels_layout.addWidget(line, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self.levels_layout.addStretch()
 
-    def _create_level_node(self, lvl: Dict, idx: int) -> QWidget:
+    def _create_track_node(self, track: Dict, t_idx: int) -> QWidget:
         node = QFrame(self.levels_container)
-        node.setFixedWidth(520)
-
-        is_unlocked = bool(lvl["is_unlocked"])
-        stars = lvl["stars"]
-
-        bg_color = "#1e293b" if is_unlocked else "#0f172a"
-        border_color = "#10b981" if stars == 3 else ("#0284c7" if is_unlocked else "#334155")
-
+        node.setFixedWidth(640)
         node.setStyleSheet(
-            f"background-color: {bg_color}; border: 2px solid {border_color}; "
-            "border-radius: 18px; padding: 18px 24px;"
+            "background-color: #1a2332; border: 1.5px solid #2a3b50; border-radius: 16px; padding: 18px 24px;"
         )
+        n_layout = QVBoxLayout(node)
+        n_layout.setSpacing(12)
 
-        n_layout = QHBoxLayout(node)
-        n_layout.setSpacing(16)
+        # Заголовок трека
+        top_row = QHBoxLayout()
+        icon_lbl = QLabel("📚" if t_idx > 0 else "🌟", node)
+        icon_lbl.setStyleSheet("font-size: 28px; background: transparent;")
+        top_row.addWidget(icon_lbl)
 
-        # Иконка узла
-        icon_lbl = QLabel(node)
-        icon_lbl.setStyleSheet("font-size: 36px; background: transparent;")
-        if not is_unlocked:
-            icon_lbl.setText("🔒")
-        elif stars == 3:
-            icon_lbl.setText("👑")
-        else:
-            icon_lbl.setText("⭐")
-        n_layout.addWidget(icon_lbl)
+        title_box = QVBoxLayout()
+        t_lbl = QLabel(track["title"], node)
+        t_lbl.setStyleSheet("font-size: 16px; font-weight: 800; color: #f8fafc; background: transparent;")
+        d_lbl = QLabel(track["description"], node)
+        d_lbl.setStyleSheet("font-size: 12px; color: #8fa3bf; background: transparent;")
+        title_box.addWidget(t_lbl)
+        title_box.addWidget(d_lbl)
+        top_row.addLayout(title_box, stretch=1)
+        n_layout.addLayout(top_row)
 
-        # Текст уровня
-        info_layout = QVBoxLayout()
-        t_lbl = QLabel(lvl["title"], node)
-        t_color = "#f8fafc" if is_unlocked else "#64748b"
-        t_lbl.setStyleSheet(f"font-size: 16px; font-weight: 800; color: {t_color}; background: transparent;")
-        info_layout.addWidget(t_lbl)
+        # Список уроков внутри блока
+        for lesson in track.get("lessons", []):
+            les_row = QFrame(node)
+            les_row.setStyleSheet(
+                "background-color: #131b2e; border: 1px solid #1e293b; border-radius: 10px; padding: 10px 14px;"
+            )
+            lr_layout = QHBoxLayout(les_row)
+            lr_layout.setContentsMargins(10, 8, 10, 8)
+            lr_layout.setSpacing(12)
 
-        d_lbl = QLabel(lvl["description"], node)
-        d_lbl.setStyleSheet("font-size: 13px; color: #94a3b8; background: transparent;")
-        info_layout.addWidget(d_lbl)
+            lr_text = QVBoxLayout()
+            les_title = QLabel(f"🎯 {lesson['title']}: «{lesson['sentence_ru']}»", les_row)
+            les_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #38bdf8; background: transparent;")
+            chips_str = " ➔ ".join([f"[{g}]" for g in lesson["gloss_sequence"]])
+            les_chips = QLabel(f"Жесты: {chips_str}", les_row)
+            les_chips.setStyleSheet("font-size: 11px; color: #94a3b8; background: transparent;")
+            lr_text.addWidget(les_title)
+            lr_text.addWidget(les_chips)
+            lr_layout.addLayout(lr_text, stretch=1)
 
-        # Цепочка слов фразы
-        phrase_chips = "  ➔  ".join([f"[{w}]" for w in lvl["target_phrase"]])
-        p_lbl = QLabel(f"Фраза: {phrase_chips}", node)
-        p_lbl.setStyleSheet("font-size: 12px; color: #38bdf8; font-weight: bold; background: transparent;")
-        info_layout.addWidget(p_lbl)
+            btn_go = QPushButton("Тренировать ➔", les_row)
+            btn_go.setProperty("class", "primary-btn")
+            btn_go.clicked.connect(lambda checked, l=lesson: self._start_custom_training(l["title"], l["gloss_sequence"]))
+            lr_layout.addWidget(btn_go)
 
-        n_layout.addLayout(info_layout)
-        n_layout.addStretch()
+            n_layout.addWidget(les_row)
 
-        # Кнопка старта / Звездочки
-        right_box = QVBoxLayout()
-        right_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # Звезды
-        stars_str = "⭐" * stars + "☆" * (3 - stars)
-        stars_lbl = QLabel(stars_str if is_unlocked else "", node)
-        stars_lbl.setStyleSheet("font-size: 14px; background: transparent;")
-        right_box.addWidget(stars_lbl)
-
-        btn_start = QPushButton("Старт ➔" if is_unlocked else "Закрыт", node)
-        btn_start.setProperty("class", "primary-btn" if is_unlocked else "secondary-btn")
-        btn_start.setEnabled(is_unlocked)
-        btn_start.clicked.connect(lambda checked, l=lvl: self._start_level(l))
-        right_box.addWidget(btn_start)
-
-        n_layout.addLayout(right_box)
         return node
+
+    def _create_db_level_node(self, lvl: Dict, idx: int) -> QWidget:
+        node = QFrame(self.levels_container)
+        node.setFixedWidth(560)
+        node.setStyleSheet(
+            "background-color: #1a2332; border: 1.5px solid #2a3b50; border-radius: 14px; padding: 16px 20px;"
+        )
+        l = QHBoxLayout(node)
+        t_lbl = QLabel(lvl["title"], node)
+        t_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #f8fafc;")
+        l.addWidget(t_lbl, stretch=1)
+
+        btn = QPushButton("Старт ➔", node)
+        btn.setProperty("class", "primary-btn")
+        btn.clicked.connect(lambda: self._start_custom_training(lvl["title"], lvl["target_phrase"]))
+        l.addWidget(btn)
+        return node
+
+    # --- Подстраница 2: Конструктор фраз (Free Phrase Builder) ---
+    def _build_phrase_builder_view(self, parent_widget: QWidget) -> None:
+        layout = QVBoxLayout(parent_widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(16)
+
+        container = QFrame(parent_widget)
+        container.setStyleSheet(
+            "background-color: #1a2332; border: 1px solid #2a3b50; border-radius: 16px; padding: 24px;"
+        )
+        c_layout = QVBoxLayout(container)
+        c_layout.setSpacing(18)
+
+        # Заголовок
+        b_title = QLabel("🛠️ Свободный конструктор фраз (2–4 жеста)", container)
+        b_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #f8fafc;")
+        b_desc = QLabel(
+            "Составьте собственное предложение из базы 966 классов жестов. "
+            "Начните вводить слово — умный поиск автоматически предложит варианты.",
+            container
+        )
+        b_desc.setStyleSheet("font-size: 13px; color: #8fa3bf; line-height: 1.4;")
+        c_layout.addWidget(b_title)
+        c_layout.addWidget(b_desc)
+
+        # Поле ввода с QCompleter
+        input_row = QHBoxLayout()
+        self.search_input = QLineEdit(container)
+        self.search_input.setPlaceholderText("🔍 Введите слово (например: «я», «хотеть», «чай», «вода»)...")
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #131b2e;
+                color: #f8fafc;
+                border: 1.5px solid #2a3b50;
+                border-radius: 10px;
+                padding: 10px 16px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #00b4d8;
+            }
+        """)
+
+        # Настройка QCompleter
+        self.completer = QCompleter(self.all_vocabulary, self)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.completer.setMaxVisibleItems(10)
+        self.search_input.setCompleter(self.completer)
+        self.search_input.returnPressed.connect(self._add_word_from_input)
+        input_row.addWidget(self.search_input, stretch=1)
+
+        btn_add = QPushButton("➕ Добавить жест", container)
+        btn_add.setProperty("class", "primary-btn")
+        btn_add.clicked.connect(self._add_word_from_input)
+        input_row.addWidget(btn_add)
+        c_layout.addLayout(input_row)
+
+        # Теги-пилюли (Tags Bar)
+        tags_box = QFrame(container)
+        tags_box.setStyleSheet(
+            "background-color: #131b2e; border: 1.5px dashed #2a3b50; border-radius: 12px; padding: 14px;"
+        )
+        self.tags_layout = QHBoxLayout(tags_box)
+        self.tags_layout.setSpacing(10)
+        self.tags_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        c_layout.addWidget(tags_box)
+
+        # Нижняя строка управления
+        bottom_row = QHBoxLayout()
+        self.phrase_warn = QLabel("💡 Добавьте от 2 до 4 жестов для запуска тренировки", container)
+        self.phrase_warn.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        bottom_row.addWidget(self.phrase_warn)
+        bottom_row.addStretch()
+
+        btn_clear = QPushButton("🗑️ Очистить", container)
+        btn_clear.setProperty("class", "secondary-btn")
+        btn_clear.clicked.connect(self._clear_custom_phrase)
+        bottom_row.addWidget(btn_clear)
+
+        self.btn_start_custom = QPushButton("🚀 Начать тренировку фразы ➔", container)
+        self.btn_start_custom.setProperty("class", "primary-btn")
+        self.btn_start_custom.setEnabled(False)
+        self.btn_start_custom.clicked.connect(self._launch_custom_training)
+        bottom_row.addWidget(self.btn_start_custom)
+
+        c_layout.addLayout(bottom_row)
+
+        self._refresh_phrase_tags()
+
+        layout.addWidget(container)
+        layout.addStretch()
+
+    def _add_word_from_input(self) -> None:
+        text = self.search_input.text().strip()
+        if not text:
+            return
+
+        # Проверка лимита 4 жеста
+        if len(self.custom_phrase) >= 4:
+            self.phrase_warn.setText("⚠️ Максимальная длина фразы: 4 жеста.")
+            self.phrase_warn.setStyleSheet("font-size: 12px; color: #fbbf24;")
+            return
+
+        # Поиск совпадения в словаре (регистронезависимый)
+        matched = None
+        for v in self.all_vocabulary:
+            if v.lower() == text.lower():
+                matched = v
+                break
+
+        if matched is None:
+            # Берем введенное слово, если не найдено строго
+            matched = text
+
+        self.custom_phrase.append(matched)
+        self.search_input.clear()
+        self._refresh_phrase_tags()
+
+    def _remove_word_tag(self, idx: int) -> None:
+        if 0 <= idx < len(self.custom_phrase):
+            self.custom_phrase.pop(idx)
+            self._refresh_phrase_tags()
+
+    def _clear_custom_phrase(self) -> None:
+        self.custom_phrase.clear()
+        self._refresh_phrase_tags()
+
+    def _refresh_phrase_tags(self) -> None:
+        # Очистка
+        while self.tags_layout.count():
+            item = self.tags_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not self.custom_phrase:
+            empty_hint = QLabel("Цепочка пуста. Введите слово выше и нажмите «Добавить жест».", self)
+            empty_hint.setStyleSheet("color: #64748b; font-size: 13px; font-style: italic;")
+            self.tags_layout.addWidget(empty_hint)
+            self.btn_start_custom.setEnabled(False)
+            self.phrase_warn.setText("💡 Добавьте от 2 до 4 жестов для запуска тренировки")
+            self.phrase_warn.setStyleSheet("font-size: 12px; color: #94a3b8;")
+            return
+
+        for idx, word in enumerate(self.custom_phrase):
+            tag_frame = QFrame()
+            tag_frame.setStyleSheet("""
+                background-color: #0b1a2d;
+                border: 1.5px solid #0077b6;
+                border-radius: 8px;
+                padding: 4px 10px;
+            """)
+            tl = QHBoxLayout(tag_frame)
+            tl.setContentsMargins(6, 2, 6, 2)
+            tl.setSpacing(6)
+
+            tag_lbl = QLabel(word, tag_frame)
+            tag_lbl.setStyleSheet("font-size: 13px; font-weight: bold; color: #00b4d8; background: transparent;")
+            tl.addWidget(tag_lbl)
+
+            btn_del = QPushButton("✕", tag_frame)
+            btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_del.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #ef4444;
+                    font-size: 12px;
+                    font-weight: bold;
+                    border: none;
+                    padding: 0;
+                }
+                QPushButton:hover {
+                    color: #f87171;
+                }
+            """)
+            btn_del.clicked.connect(lambda checked, i=idx: self._remove_word_tag(i))
+            tl.addWidget(btn_del)
+            self.tags_layout.addWidget(tag_frame)
+
+            if idx < len(self.custom_phrase) - 1:
+                arrow_lbl = QLabel("➔", self)
+                arrow_lbl.setStyleSheet("color: #475569; font-weight: bold; font-size: 14px;")
+                self.tags_layout.addWidget(arrow_lbl)
+
+        # Проверка готовности (2–4 жеста)
+        is_ready = 2 <= len(self.custom_phrase) <= 4
+        self.btn_start_custom.setEnabled(is_ready)
+        if is_ready:
+            self.phrase_warn.setText(f"✓ Фраза готова ({len(self.custom_phrase)} жеста). Нажмите «Начать тренировку».")
+            self.phrase_warn.setStyleSheet("font-size: 12px; color: #34d399; font-weight: bold;")
+        else:
+            self.phrase_warn.setText(f"💡 Выбрано: {len(self.custom_phrase)} / 4. Требуется минимум 2 жеста.")
+            self.phrase_warn.setStyleSheet("font-size: 12px; color: #94a3b8;")
+
+    def _launch_custom_training(self) -> None:
+        title = f"Пользовательская фраза ({len(self.custom_phrase)} жеста)"
+        self._start_custom_training(title, self.custom_phrase)
 
     # -------------------------------------------------------------
     # СТРАНИЦА 2: GUIDED COMPOSITION (ТРЕНИРОВКА ФРАЗЫ)
@@ -231,7 +536,7 @@ class SentenceLevelsScreen(QWidget):
         header = QHBoxLayout()
         btn_back = QPushButton("← В карту уровней", page)
         btn_back.setProperty("class", "secondary-btn")
-        btn_back.clicked.connect(self._back_to_tree)
+        btn_back.clicked.connect(self._back_to_hub)
         header.addWidget(btn_back)
 
         self.cur_lvl_title = QLabel("УРОВЕНЬ 1", page)
@@ -247,7 +552,7 @@ class SentenceLevelsScreen(QWidget):
         header.addWidget(self.phrase_status)
         layout.addLayout(header)
 
-        # Интерактивная цепочка чипсов фразы: [Я] -> [ХОТЕТЬ] -> [ВОДА]
+        # Интерактивная цепочка чипсов фразы
         self.chips_frame = QFrame(page)
         self.chips_frame.setStyleSheet(
             "background-color: #1e293b; border: 1.5px solid #334155; border-radius: 14px; padding: 10px 18px;"
@@ -308,7 +613,7 @@ class SentenceLevelsScreen(QWidget):
         icon.setStyleSheet("font-size: 56px; background: transparent;")
         c_layout.addWidget(icon)
 
-        t_lbl = QLabel("УРОВЕНЬ УСПЕШНО ПРОЙДЕН!", card)
+        t_lbl = QLabel("ФРАЗА УСПЕШНО ОСВОЕНА!", card)
         t_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t_lbl.setStyleSheet("font-size: 24px; font-weight: 900; color: #f8fafc;")
         c_layout.addWidget(t_lbl)
@@ -326,9 +631,9 @@ class SentenceLevelsScreen(QWidget):
         c_layout.addSpacing(16)
 
         btn_row = QHBoxLayout()
-        btn_map = QPushButton("Вернуться к карте уровней", card)
+        btn_map = QPushButton("Вернуться в хаб предложений", card)
         btn_map.setProperty("class", "primary-btn")
-        btn_map.clicked.connect(self._back_to_tree)
+        btn_map.clicked.connect(self._back_to_hub)
         btn_row.addWidget(btn_map)
         c_layout.addLayout(btn_row)
 
@@ -349,18 +654,17 @@ class SentenceLevelsScreen(QWidget):
         except Exception:
             pass
 
-    def _start_level(self, level_dict: Dict) -> None:
-        self.current_level_data = level_dict
-        self.current_phrase = list(level_dict["target_phrase"])
+    def _start_custom_training(self, title: str, gloss_sequence: List[str]) -> None:
+        self.current_title = title
+        self.current_phrase = list(gloss_sequence)
         self.step_idx = 0
         self.state = "IDLE"
         self.frame_buffer.clear()
         self.phrase_buffer_bar.setValue(0)
 
-        self.cur_lvl_title.setText(level_dict["title"].upper())
+        self.cur_lvl_title.setText(title.upper())
         self._render_phrase_chips()
 
-        # Инициализация модели при необходимости
         if self.verifier is None:
             self.phrase_hint.setText("Загрузка нейросети...")
             try:
@@ -368,10 +672,8 @@ class SentenceLevelsScreen(QWidget):
             except Exception as e:
                 self.phrase_hint.setText(f"Ошибка загрузки: {e}")
 
-        # Переключение на страницу сборки фразы
         self.stack.setCurrentIndex(1)
 
-        # Камера в режиме DYNAMIC
         self.camera_worker.set_mode(TrackerMode.DYNAMIC)
         self.camera_worker.frame_ready.connect(self._on_frame_ready)
         if not self.camera_worker.isRunning():
@@ -379,13 +681,12 @@ class SentenceLevelsScreen(QWidget):
 
         self._setup_step()
 
-    def _back_to_tree(self) -> None:
+    def _back_to_hub(self) -> None:
         self.on_leave()
         self.stack.setCurrentIndex(0)
         self._refresh_levels_tree()
 
     def _render_phrase_chips(self) -> None:
-        # Очистка
         while self.chips_layout.count():
             item = self.chips_layout.takeAt(0)
             w = item.widget()
@@ -399,21 +700,18 @@ class SentenceLevelsScreen(QWidget):
         for i, word in enumerate(self.current_phrase):
             chip = QLabel(self.chips_frame)
             if i < self.step_idx:
-                # Уже сданный жест
                 chip.setText(f"✓ {word}")
                 chip.setStyleSheet(
                     "background-color: #064e3b; color: #34d399; border: 1.5px solid #059669; "
                     "border-radius: 8px; padding: 6px 14px; font-weight: bold; font-size: 13px;"
                 )
             elif i == self.step_idx:
-                # Активный текущий жест
                 chip.setText(f"👉 {word}")
                 chip.setStyleSheet(
                     "background-color: #451a03; color: #fbbf24; border: 2px solid #f59e0b; "
                     "border-radius: 8px; padding: 6px 14px; font-weight: 800; font-size: 14px;"
                 )
             else:
-                # Будущий жест
                 chip.setText(f"… {word}")
                 chip.setStyleSheet(
                     "background-color: #0f172a; color: #64748b; border: 1px dashed #334155; "
@@ -522,12 +820,7 @@ class SentenceLevelsScreen(QWidget):
 
     def _complete_current_level(self) -> None:
         self.on_leave()
-        level_id = self.current_level_data["level_id"]
-
-        # Сохранение прогресса
-        self.db.complete_level(level_id, stars=3)
         self.db.add_xp(50)
         self.db.update_streak()
-
         self.audio.play_level_complete()
         self.stack.setCurrentIndex(2)

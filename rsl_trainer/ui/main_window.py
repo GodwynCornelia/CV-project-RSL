@@ -119,7 +119,9 @@ class MainWindow(QMainWindow):
         # Ветка А: Дактиль
         nav.register_screen("dactyl_menu", DactylMenuScreen(nav))
         nav.register_screen("alphabet_grid", AlphabetGridScreen(nav, self.db))
-        nav.register_screen("letter_card_view", LetterCardViewScreen(nav))
+        letter_card_scr = LetterCardViewScreen(nav)
+        nav.register_screen("letter_card", letter_card_scr)
+        nav.register_screen("letter_card_view", letter_card_scr)
         nav.register_screen("dactyl_trainer", DactylTrainerScreen(nav, self.camera_worker, self.db))
         nav.register_screen("test_config", TestConfigScreen(nav))
         nav.register_screen("exam_camera", ExamCameraScreen(nav, self.camera_worker, self.db))
@@ -127,7 +129,9 @@ class MainWindow(QMainWindow):
         # Ветка Б: Динамические жесты
         nav.register_screen("dynamic_menu", DynamicMenuScreen(nav))
         nav.register_screen("word_catalog", WordCatalogScreen(nav, self.db))
-        nav.register_screen("gesture_card_view", GestureCardViewScreen(nav))
+        gesture_card_scr = GestureCardViewScreen(nav)
+        nav.register_screen("gesture_card", gesture_card_scr)
+        nav.register_screen("gesture_card_view", gesture_card_scr)
         nav.register_screen("gesture_trainer", GestureTrainerScreen(nav, self.camera_worker, self.db))
         nav.register_screen("sentence_levels", SentenceLevelsScreen(nav, self.camera_worker, self.db))
 

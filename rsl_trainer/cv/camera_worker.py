@@ -49,23 +49,23 @@ class CameraWorker(QThread):
             self.stop()
             self.start()
 
-    def run(self) -> None:
         self._is_running = True
+        self.is_mock_mode = False
+        consecutive_fails = 0
+
         try:
-            self._cap = cv2.VideoCapture(self.camera_id)
-            # Настройка разрешения камеры для легкости обработки
+            import sys
+            backend = cv2.CAP_DSHOW if sys.platform.startswith("win") else cv2.CAP_ANY
+            self._cap = cv2.VideoCapture(self.camera_id, backend)
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
             if not self._cap.isOpened():
-                self.camera_error.emit(f"Не удалось подключиться к камере #{self.camera_id}. Проверьте доступ в системе.")
-                self._is_running = False
-                return
-
+                self.is_mock_mode = True
+                logger.warning("Физическая веб-камера не найдена. Активирован режим MOCK-камеры.")
         except Exception as e:
-            self.camera_error.emit(f"Аппаратный сбой инициализации камеры: {e}")
-            self._is_running = False
-            return
+            self.is_mock_mode = True
+            logger.warning(f"Ошибка открытия камеры ({e}). Активирован режим MOCK-камеры.")
 
         frame_count = 0
         fps_start = time.perf_counter()
@@ -73,12 +73,48 @@ class CameraWorker(QThread):
         while self._is_running:
             loop_start = time.perf_counter()
 
+            if self.is_mock_mode:
+                # Генерация темного кадра 640x480 с анимацией и информационным текстом
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                t = time.perf_counter()
+                cx = int(320 + 80 * np.sin(t * 2))
+                cy = int(240 + 50 * np.cos(t * 2))
+
+                # Легкая технологичная сетка
+                for gx in range(0, 640, 80):
+                    cv2.line(frame, (gx, 0), (gx, 480), (25, 35, 50), 1)
+                for gy in range(0, 480, 60):
+                    cv2.line(frame, (0, gy), (640, gy), (25, 35, 50), 1)
+
+                cv2.circle(frame, (cx, cy), 12, (0, 180, 255), -1)
+                cv2.circle(frame, (cx, cy), 18, (0, 180, 255), 1)
+
+                cv2.putText(
+                    frame, "РЕЖИМ ТЕСТИРОВАНИЯ (КАМЕРА НЕ ОБНАРУЖЕНА)",
+                    (35, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (100, 200, 255), 2
+                )
+                cv2.putText(
+                    frame, "Mock Stream Active | 30 FPS",
+                    (35, 265), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (148, 163, 184), 1
+                )
+
+                dummy_features = np.zeros(118, dtype=np.float32)
+                self.frame_ready.emit(frame, dummy_features, None)
+                time.sleep(0.033)
+                continue
+
             try:
                 ret, frame = self._cap.read()
                 if not ret or frame is None:
-                    self.camera_error.emit("Потерян сигнал веб-камеры. Попытка переподключения...")
-                    time.sleep(0.5)
+                    consecutive_fails += 1
+                    if consecutive_fails > 10:
+                        logger.warning("Камера недоступна длительное время. Переход в Mock режим.")
+                        self.is_mock_mode = True
+                    else:
+                        time.sleep(0.1)
                     continue
+
+                consecutive_fails = 0
 
                 # Зеркальное отражение для комфортного восприятия пользователя (как в зеркале)
                 frame = cv2.flip(frame, 1)

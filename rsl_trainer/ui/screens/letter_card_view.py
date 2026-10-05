@@ -205,5 +205,9 @@ class LetterCardScreen(QWidget):
         hand_pts = self.evaluator._get_template_hand(letter)
         self.preview_widget.set_hand(hand_pts)
 
+    def set_params(self, **kwargs) -> None:
+        """Алиас для установки параметров экрана."""
+        self.on_enter(**kwargs)
+
     def _go_to_trainer(self) -> None:
         self.navigator.push_screen("dactyl_trainer", letter=self.current_letter)

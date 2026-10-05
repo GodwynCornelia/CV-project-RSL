@@ -36,8 +36,12 @@ def test_full_navigation_tree_transitions(qapp):
     nav.push_screen("alphabet_grid")
     assert nav.currentWidget() == nav.get_screen("alphabet_grid")
 
-    # Сетка -> Карточка буквы 'А'
-    nav.push_screen("letter_card_view", letter="А")
+    # Сетка -> Карточка буквы 'А' через оба алиаса (letter_card и letter_card_view)
+    nav.push_screen("letter_card", letter="А")
+    assert nav.currentWidget() == nav.get_screen("letter_card")
+    nav.pop_screen()
+
+    nav.push_screen("letter_card_view", letter="Б")
     assert nav.currentWidget() == nav.get_screen("letter_card_view")
 
     # Карточка -> Тренажер буквы 'А'
@@ -98,11 +102,19 @@ def test_full_navigation_tree_transitions(qapp):
     nav.navigate_home()
     assert nav.currentWidget() == nav.get_screen("main_menu")
 
-    # 6. Модальные окна Инфо и Настройки
+    # 6. Модальные окна Инфо и Настройки (оба алиаса)
+    nav.push_screen("info")
+    assert nav.currentWidget() == nav.get_screen("info")
+    nav.pop_screen()
+
     nav.push_screen("info_modal")
     assert nav.currentWidget() == nav.get_screen("info_modal")
     nav.pop_screen()
     assert nav.currentWidget() == nav.get_screen("main_menu")
+
+    nav.push_screen("settings")
+    assert nav.currentWidget() == nav.get_screen("settings")
+    nav.pop_screen()
 
     nav.push_screen("settings_modal")
     assert nav.currentWidget() == nav.get_screen("settings_modal")
