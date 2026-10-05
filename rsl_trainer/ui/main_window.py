@@ -107,8 +107,14 @@ class MainWindow(QMainWindow):
         nav = self.navigator
 
         nav.register_screen("main_menu", MainMenuScreen(nav, self.db))
-        nav.register_screen("info_modal", InfoModalScreen(nav))
-        nav.register_screen("settings_modal", SettingsModalScreen(nav, self.config))
+
+        info_scr = InfoModalScreen(nav)
+        nav.register_screen("info", info_scr)
+        nav.register_screen("info_modal", info_scr)
+
+        settings_scr = SettingsModalScreen(nav, self.config)
+        nav.register_screen("settings", settings_scr)
+        nav.register_screen("settings_modal", settings_scr)
 
         # Ветка А: Дактиль
         nav.register_screen("dactyl_menu", DactylMenuScreen(nav))
