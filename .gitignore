@@ -1,12 +1,18 @@
 # Datasets & extracted features
 hybrid_tensors/
 *.npy
+!rsl_trainer/assets/skeletons/*.npy
+
+# Local databases
+*.db
+userdata.db
 
 # Python bytecode & cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.pytest_cache/
 
 # Environments
 .venv/
