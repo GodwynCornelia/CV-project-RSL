@@ -6,13 +6,6 @@ from rsl_trainer.config import AppConfig
 from rsl_trainer.ui.main_window import MainWindow
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
-
 
 def test_full_navigation_tree_transitions(qapp):
     """

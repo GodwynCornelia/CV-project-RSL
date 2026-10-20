@@ -33,10 +33,14 @@ class DactylTrainerScreen(QWidget):
         self.navigator = navigator
         self.camera_worker = camera_worker
         self.db = db
-        self.audio = AudioFeedback()
+        self.audio = AudioFeedback(config=camera_worker.config)
+        self._active = False
+        camera_worker.camera_error.connect(self._on_camera_error)
 
         self.current_letter = "А"
-        self.evaluator = DactylEvaluator(threshold=0.70, hold_duration=1.5)
+        self.evaluator = DactylEvaluator(skeletons_dir=camera_worker.config.skeletons_dir,
+                                         threshold=camera_worker.config.dactyl_threshold,
+                                         hold_duration=camera_worker.config.dactyl_hold_seconds)
         self.ghost_renderer = GhostOverlayRenderer()
         self.template_hand: Optional[np.ndarray] = None
         self._is_completed = False
@@ -93,6 +97,7 @@ class DactylTrainerScreen(QWidget):
     def on_enter(self, letter: str = "А", **kwargs) -> None:
         """Запуск камеры и установка целевой буквы."""
         self.current_letter = letter
+        self._active = True
         self._is_completed = False
         self.btn_next.setEnabled(False)
         self.title_lbl.setText(f"ТРЕНИРОВКА: БУКВА «{letter}»")
@@ -114,16 +119,20 @@ class DactylTrainerScreen(QWidget):
 
     def on_leave(self) -> None:
         """Отключение сигналов при уходе с экрана."""
+        self._active = False
         try:
             self.camera_worker.frame_ready.disconnect(self._on_frame_ready)
         except Exception:
             pass
+        self.evaluator.evaluate_hand(None)
+        self.camera_worker.stop()
 
     def _go_back(self) -> None:
-        self.on_leave()
         self.navigator.pop_screen()
 
     def _on_frame_ready(self, frame_bgr: np.ndarray, features_118: np.ndarray, primary_hand: Optional[np.ndarray]) -> None:
+        if not self._active:
+            return
         if self._is_completed:
             # Отрисовка финального кадра
             self.video_canvas.update_frame(frame_bgr)
@@ -142,10 +151,7 @@ class DactylTrainerScreen(QWidget):
             )
 
         # 3. Оценка совпадения и удержания
-        if primary_hand is not None:
-            score, hold_prog, is_confirmed = self.evaluator.evaluate_hand(primary_hand)
-        else:
-            score, hold_prog, is_confirmed = 0.0, 0.0, False
+        score, hold_prog, is_confirmed = self.evaluator.evaluate_hand(primary_hand)
 
         self.video_canvas.set_hold_metrics(score, hold_prog, show_bar=True)
         self.video_canvas.update_frame(frame_with_box)
@@ -153,6 +159,11 @@ class DactylTrainerScreen(QWidget):
         # 4. Обработка успешного выполнения
         if is_confirmed and not self._is_completed:
             self._on_success(score)
+
+    def _on_camera_error(self, message):
+        if self._active:
+            self.evaluator.evaluate_hand(None)
+            self.video_canvas.set_placeholder_text("Переподключите камеру, чтобы продолжить тренировку")
 
     def _on_success(self, score: float) -> None:
         self._is_completed = True

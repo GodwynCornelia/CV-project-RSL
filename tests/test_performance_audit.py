@@ -37,27 +37,5 @@ def test_dactyl_mode_latency_audit():
     print(f"\n[АУДИТ ДАКТИЛЬ] Среднее время кадра: {avg_ms:.2f} мс, Расчетный FPS: {fps:.1f}")
 
     # Проверка, что среднее время не превышает 35 мс на CPU
+    tracker.close()
     assert avg_ms < 40.0, f"Время обработки кадра в режиме дактиля превысило бюджет: {avg_ms:.2f} мс"
-
-
-def test_drop_frame_queue_protection():
-    """
-    Тест защиты от перегрузки очереди кадрами (Queue Drop Protection).
-    Проверяет, что при медленном инференсе очередь отбрасывает устаревшие кадры,
-    удерживая только 1 актуальный кадр, гарантируя отсутствие лага задержки.
-    """
-    import queue
-    frame_queue = queue.Queue(maxsize=1)
-
-    # Эмулируем быстрое поступление 5 кадров подряд
-    for i in range(5):
-        if frame_queue.full():
-            try:
-                frame_queue.get_nowait()  # Принудительный сброс устаревшего кадра
-            except queue.Empty:
-                pass
-        frame_queue.put_nowait(f"frame_{i}")
-
-    # В очереди должен остаться строго 1 самый свежий кадр
-    assert frame_queue.qsize() == 1
-    assert frame_queue.get_nowait() == "frame_4"

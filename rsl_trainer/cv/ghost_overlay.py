@@ -43,6 +43,7 @@ class GhostOverlayRenderer:
         Отрисовывает габаритную рамку калибровки (угловые метки для руки) в правой верхней зоне.
         box: (x, y, w, h)
         """
+        frame_bgr = frame_bgr.copy()
         h, w, _ = frame_bgr.shape
         if box is None:
             # Дефолтная зона: справа по центру
@@ -71,7 +72,6 @@ class GhostOverlayRenderer:
         cv2.line(frame_bgr, (bx + bw, by + bh), (bx + bw - corner_len, by + bh), col, thick)
         cv2.line(frame_bgr, (bx + bw, by + bh), (bx + bw, by + bh - corner_len), col, thick)
 
-        cv2.putText(frame_bgr, "ЗОНА ДЛЯ РУКИ", (bx + 8, by - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
         return frame_bgr, box
 
     def render_ghost_hand(
@@ -88,38 +88,24 @@ class GhostOverlayRenderer:
             return frame_bgr
 
         bx, by, bw, bh = calibration_box
-        target_center_x = bx + bw // 2
-        target_center_y = by + int(bh * 0.65)
-        scale_px = bh * 0.45
+        from rsl_trainer.core.dactyl_evaluator import DactylEvaluator
 
-        # Масштабирование шаблона кисти в пиксели кадра
-        norm_t = template_hand_21x2.copy()
-        wrist = norm_t[0]
-        norm_t = norm_t - wrist
-        # Нормализуем по MCP
-        mcp = norm_t[9] if np.any(norm_t[9] != 0) else norm_t[5]
-        s = float(np.linalg.norm(mcp)) or 1.0
-        norm_t = (norm_t / s) * scale_px
-
-        ghost_pts = np.zeros((21, 2), dtype=np.int32)
-        ghost_pts[:, 0] = (target_center_x + norm_t[:, 0]).astype(np.int32)
-        ghost_pts[:, 1] = (target_center_y + norm_t[:, 1]).astype(np.int32)
-
-        # Подложка для полупрозрачности
+        normalized = DactylEvaluator.normalize_single_hand(template_hand_21x2)
+        # Match the mirrored camera preview while comparing unmirrored landmarks.
+        display = normalized * np.array([-1, 1])
+        low, high = display.min(axis=0), display.max(axis=0)
+        scale_px = min(bw * 0.80 / max(high[0] - low[0], 1e-6),
+                       bh * 0.80 / max(high[1] - low[1], 1e-6))
+        ghost_pts = ((display - (low + high) / 2) * scale_px + [bx + bw / 2, by + bh / 2]).astype(np.int32)
         overlay = frame_bgr.copy()
+        deviations = np.zeros(21, dtype=bool)
+        if live_hand_21x2 is not None and np.any(live_hand_21x2 != 0):
+            live = DactylEvaluator.normalize_single_hand(live_hand_21x2)
+            reflected = live * np.array([-1, 1])
+            if np.linalg.norm(reflected - normalized, axis=1).mean() < np.linalg.norm(live - normalized, axis=1).mean():
+                live = reflected
+            deviations = np.linalg.norm(live - normalized, axis=1) * scale_px > self.delta_err_thresh
 
-        # Оценка локального отклонения каждого сустава
-        deviations = [False] * 21
-        if live_hand_21x2 is not None and np.any(live_hand_21x2 > 0):
-            # Сопоставляем живую руку с призраком
-            live_wrist = live_hand_21x2[0]
-            live_aligned = live_hand_21x2 - live_wrist + [target_center_x, target_center_y]
-            diffs = np.linalg.norm(live_aligned - ghost_pts, axis=1)
-            for idx in range(21):
-                if diffs[idx] > self.delta_err_thresh:
-                    deviations[idx] = True
-
-        # Цвета:
         normal_ghost_color = (255, 200, 80)    # Небесно-голубой эталон
         warning_color = (30, 140, 255)         # Оранжево-янтарный цвет отклонения
 

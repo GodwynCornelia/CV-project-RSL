@@ -15,11 +15,14 @@ class NavigationManager(QStackedWidget):
         super().__init__(parent)
         self._screens: Dict[str, QWidget] = {}
         self._history = []
+        self._params: Dict[str, dict] = {}
+        self._current_name = None
 
     def register_screen(self, name: str, screen_widget: QWidget) -> None:
         """Регистрирует экран в навигаторе."""
         self._screens[name] = screen_widget
-        self.addWidget(screen_widget)
+        if self.indexOf(screen_widget) == -1:
+            self.addWidget(screen_widget)
 
     def get_screen(self, name: str) -> Optional[QWidget]:
         return self._screens.get(name)
@@ -34,10 +37,14 @@ class NavigationManager(QStackedWidget):
 
         # Сохраняем текущий экран в стек истории только при смене экрана
         if current_widget is not None and current_widget != target_widget:
-            for s_name, s_widget in self._screens.items():
-                if s_widget == current_widget:
-                    self._history.append(s_name)
-                    break
+            if self._current_name is not None:
+                self._history.append(self._current_name)
+
+        if self._current_name is not None and hasattr(current_widget, "on_leave"):
+            current_widget.on_leave()
+
+        self._params[name] = dict(kwargs)
+        self._current_name = name
 
         # Вызов хука подготовки экрана (если определен метод on_enter)
         if hasattr(target_widget, "on_enter"):
@@ -60,8 +67,9 @@ class NavigationManager(QStackedWidget):
                 curr.on_leave()
 
             if hasattr(target_widget, "on_enter"):
-                target_widget.on_enter()
+                target_widget.on_enter(**self._params.get(prev_screen_name, {}))
 
+            self._current_name = prev_screen_name
             self.setCurrentWidget(target_widget)
             self.screen_changed.emit(prev_screen_name)
 
@@ -71,4 +79,9 @@ class NavigationManager(QStackedWidget):
         if hasattr(curr, "on_leave"):
             curr.on_leave()
         self._history.clear()
-        self.push_screen("main_menu")
+        target = self._screens["main_menu"]
+        self._current_name = "main_menu"
+        if hasattr(target, "on_enter"):
+            target.on_enter()
+        self.setCurrentWidget(target)
+        self.screen_changed.emit("main_menu")

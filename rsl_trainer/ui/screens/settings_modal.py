@@ -2,6 +2,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -20,10 +21,11 @@ class SettingsScreen(QWidget):
     Управление индексом камеры, порогом чувствительности верификатора и звуком.
     """
 
-    def __init__(self, navigator, config: AppConfig, parent=None):
+    def __init__(self, navigator, config: AppConfig, parent=None, camera_worker=None):
         super().__init__(parent)
         self.navigator = navigator
         self.config = config
+        self.camera_worker = camera_worker
 
         self._build_ui()
 
@@ -89,6 +91,18 @@ class SettingsScreen(QWidget):
         thresh_row.addWidget(thresh_desc)
         c_layout.addLayout(thresh_row)
 
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(QLabel("Время выполнения динамического жеста:"))
+        self.spin_duration = QDoubleSpinBox()
+        self.spin_duration.setRange(1.0, 8.0)
+        self.spin_duration.setSingleStep(0.5)
+        self.spin_duration.setSuffix(" сек")
+        self.spin_duration.setValue(self.config.dynamic_recording_seconds)
+        self.spin_duration.valueChanged.connect(self._on_duration_changed)
+        duration_row.addStretch()
+        duration_row.addWidget(self.spin_duration)
+        c_layout.addLayout(duration_row)
+
         # 3. Аудио обратная связь
         sound_row = QHBoxLayout()
         self.chk_sound = QCheckBox("Звуковые сигналы успеха / ошибки (для слабовидящих)")
@@ -118,7 +132,10 @@ class SettingsScreen(QWidget):
         layout.addStretch()
 
     def _on_camera_changed(self, idx: int) -> None:
-        self.config.camera_id = idx
+        if self.camera_worker is not None:
+            self.camera_worker.set_camera_id(idx)
+        else:
+            self.config.camera_id = idx
 
     def _on_thresh_changed(self, val: int) -> None:
         self.config.dynamic_confidence_threshold = val / 100.0
@@ -126,3 +143,6 @@ class SettingsScreen(QWidget):
 
     def _on_sound_toggled(self, checked: bool) -> None:
         self.config.sound_enabled = checked
+
+    def _on_duration_changed(self, seconds: float) -> None:
+        self.config.dynamic_recording_seconds = seconds

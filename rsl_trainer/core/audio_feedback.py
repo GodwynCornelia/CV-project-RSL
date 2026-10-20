@@ -11,8 +11,19 @@ class AudioFeedback:
     и геймификации. Все звуки воспроизводятся в фоновом потоке, исключая лаги GUI.
     """
 
-    def __init__(self, enabled: bool = True):
-        self.enabled = enabled
+    def __init__(self, enabled: bool = True, config=None):
+        self._enabled = enabled
+        self.config = config
+
+    @property
+    def enabled(self):
+        return self.config.sound_enabled if self.config is not None else self._enabled
+
+    @enabled.setter
+    def enabled(self, value):
+        self._enabled = value
+        if self.config is not None:
+            self.config.sound_enabled = value
 
     def _play_async(self, fn) -> None:
         if not self.enabled:

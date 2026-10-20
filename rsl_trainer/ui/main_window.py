@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from rsl_trainer.config import AppConfig
+from rsl_trainer.core.inference_service import GestureInferenceService
 from rsl_trainer.cv.camera_worker import CameraWorker
 from rsl_trainer.database.db_manager import DatabaseManager
 from rsl_trainer.ui.navigation import NavigationManager
@@ -54,7 +55,10 @@ class MainWindow(QMainWindow):
 
         # Фоновый воркер камеры
         self.camera_worker = CameraWorker(self.config)
+        self.inference_service = GestureInferenceService(self.config, self)
+        self.camera_worker.inference_service = self.inference_service
         self.camera_worker.camera_error.connect(self._on_camera_error)
+        self.camera_worker.frame_ready.connect(self._on_camera_frame)
 
         self._build_ui()
         self._register_screens()
@@ -112,7 +116,7 @@ class MainWindow(QMainWindow):
         nav.register_screen("info", info_scr)
         nav.register_screen("info_modal", info_scr)
 
-        settings_scr = SettingsModalScreen(nav, self.config)
+        settings_scr = SettingsModalScreen(nav, self.config, camera_worker=self.camera_worker)
         nav.register_screen("settings", settings_scr)
         nav.register_screen("settings_modal", settings_scr)
 
@@ -131,7 +135,7 @@ class MainWindow(QMainWindow):
         catalog_scr = WordCatalogScreen(nav, self.db)
         nav.register_screen("word_catalog", catalog_scr)
         nav.register_screen("gesture_catalog", catalog_scr)
-        gesture_card_scr = GestureCardViewScreen(nav)
+        gesture_card_scr = GestureCardViewScreen(nav, config=self.config)
         nav.register_screen("gesture_card", gesture_card_scr)
         nav.register_screen("gesture_card_view", gesture_card_scr)
         nav.register_screen("gesture_trainer", GestureTrainerScreen(nav, self.camera_worker, self.db))
@@ -145,18 +149,26 @@ class MainWindow(QMainWindow):
         self.error_lbl.setText(f"Сбой камеры: {err_msg}. Подключите камеру и нажмите «Переподключить».")
         self.error_banner.show()
 
+    def _on_camera_frame(self, frame, features, hand) -> None:
+        self.error_banner.hide()
+
     def _retry_camera(self) -> None:
         """Попытка переподключения камеры."""
         self.error_banner.hide()
-        self.camera_worker.stop()
-        self.camera_worker.wait(500)
-        self.camera_worker.start()
+        if self.camera_worker.stop():
+            self.camera_worker.start()
+        else:
+            self._on_camera_error("Предыдущий поток камеры ещё завершает работу")
 
     def closeEvent(self, event) -> None:
         """Безопасная остановка потоков при закрытии приложения."""
-        try:
-            self.camera_worker.stop()
-            self.camera_worker.wait(1500)
-        except Exception:
-            pass
-        event.accept()
+        current = self.navigator.currentWidget()
+        if hasattr(current, "on_leave"):
+            current.on_leave()
+        camera_stopped = self.camera_worker.stop()
+        inference_stopped = self.inference_service.shutdown()
+        if camera_stopped and inference_stopped:
+            event.accept()
+        else:
+            self._on_camera_error("Ожидается завершение обработки. Повторите закрытие окна.")
+            event.ignore()

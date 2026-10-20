@@ -5,13 +5,6 @@ from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from rsl_trainer.ui.navigation import NavigationManager
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
-
 
 def test_navigation_flow(qapp):
     nav = NavigationManager()
@@ -65,3 +58,33 @@ def test_on_enter_hooks(qapp):
     nav.push_screen("custom", letter="Ж", mode="test")
 
     assert cust.entered_args == {"letter": "Ж", "mode": "test"}
+
+
+def test_back_restores_selection_and_forward_calls_leave(qapp):
+    class Screen(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.params = None
+            self.leaves = 0
+
+        def on_enter(self, **kwargs):
+            self.params = kwargs
+
+        def on_leave(self):
+            self.leaves += 1
+
+    nav = NavigationManager()
+    home, card, trainer = Screen(), Screen(), Screen()
+    for name, screen in (("main_menu", home), ("card", card), ("trainer", trainer)):
+        nav.register_screen(name, screen)
+    nav.push_screen("main_menu")
+    nav.push_screen("card", word="вода")
+    nav.push_screen("trainer", target_word="вода")
+    assert card.leaves == 1
+    nav.pop_screen()
+    assert card.params == {"word": "вода"}
+    assert trainer.leaves == 1
+    nav.navigate_home()
+    assert nav._history == []
+    nav.pop_screen()
+    assert nav.currentWidget() is home

@@ -37,9 +37,14 @@ class ExamCameraScreen(QWidget):
         self.navigator = navigator
         self.camera_worker = camera_worker
         self.db = db
-        self.audio = AudioFeedback()
+        self.audio = AudioFeedback(config=camera_worker.config)
+        self._active = False
+        self._camera_failed = False
+        camera_worker.camera_error.connect(self._on_camera_error)
 
-        self.evaluator = DactylEvaluator(threshold=0.70, hold_duration=1.0)
+        self.evaluator = DactylEvaluator(skeletons_dir=camera_worker.config.skeletons_dir,
+                                         threshold=camera_worker.config.dactyl_threshold,
+                                         hold_duration=camera_worker.config.dactyl_hold_seconds)
         self.ghost_renderer = GhostOverlayRenderer()
 
         # Параметры экзамена
@@ -194,6 +199,8 @@ class ExamCameraScreen(QWidget):
     def on_enter(self, question_count: int = 5, **kwargs) -> None:
         """Инициализация экзаменационной сессии."""
         self.question_count = min(question_count, len(RUSSIAN_ALPHABET))
+        self._active = True
+        self._camera_failed = False
         # Выбираем случайные уникальные буквы
         self.exam_letters = random.sample(RUSSIAN_ALPHABET, self.question_count)
         self.current_idx = 0
@@ -213,14 +220,16 @@ class ExamCameraScreen(QWidget):
         self._setup_question()
 
     def on_leave(self) -> None:
+        self._active = False
         self.timer.stop()
         try:
             self.camera_worker.frame_ready.disconnect(self._on_frame_ready)
         except Exception:
             pass
+        self.evaluator.evaluate_hand(None)
+        self.camera_worker.stop()
 
     def _abort_exam(self) -> None:
-        self.on_leave()
         self.navigator.pop_screen()
 
     def _setup_question(self) -> None:
@@ -272,17 +281,17 @@ class ExamCameraScreen(QWidget):
         self._setup_question()
 
     def _on_frame_ready(self, frame_bgr: np.ndarray, features_118: np.ndarray, primary_hand: Optional[np.ndarray]) -> None:
-        if self.stack.currentIndex() != 0:
+        if not self._active or self.stack.currentIndex() != 0:
             return
+        if self._camera_failed:
+            self._camera_failed = False
+            self.timer.start()
 
         # В экзамене рисуем только калибровочную рамку (БЕЗ ghost overlay!)
         frame_with_box, calib_box = self.ghost_renderer.draw_calibration_box(frame_bgr)
 
         # Оценка совпадения
-        if primary_hand is not None:
-            score, hold_prog, is_confirmed = self.evaluator.evaluate_hand(primary_hand)
-        else:
-            score, hold_prog, is_confirmed = 0.0, 0.0, False
+        score, hold_prog, is_confirmed = self.evaluator.evaluate_hand(primary_hand)
 
         self.video_canvas.set_hold_metrics(score, hold_prog, show_bar=True)
         self.video_canvas.update_frame(frame_with_box)
@@ -297,6 +306,15 @@ class ExamCameraScreen(QWidget):
 
             self.current_idx += 1
             self._setup_question()
+
+    def _on_camera_error(self, message):
+        if not self._active:
+            return
+        self._camera_failed = True
+        self.timer.stop()
+        self.evaluator.evaluate_hand(None)
+        self.timer_badge.setText("Пауза: камера недоступна")
+        self.video_canvas.set_placeholder_text("Переподключите камеру, чтобы продолжить экзамен")
 
     def _show_results(self) -> None:
         """Показ экрана итогов экзамена."""

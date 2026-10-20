@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import numpy as np
+from rsl_trainer.core.hand_reference import extract_active_hand
 
 
 class DactylEvaluator:
@@ -24,64 +25,45 @@ class DactylEvaluator:
         self._target_letter: Optional[str] = None
         self._hold_start_time: Optional[float] = None
         self._is_holding: bool = False
+        self._last_observation: Optional[float] = None
 
     def set_target_letter(self, letter: str) -> None:
         """Устанавливает текущую целевую букву для тренировки."""
         self._target_letter = letter
         self._hold_start_time = None
         self._is_holding = False
+        self._last_observation = None
 
     def _get_template_hand(self, letter: str) -> Optional[np.ndarray]:
         """Возвращает эталонную конфигурацию кисти (21, 2) для буквы."""
         if letter in self._template_cache:
             return self._template_cache[letter]
 
-        # 1. Поиск в кэше skeletons
+        # Evaluate a few real examples instead of taking an arbitrary middle frame.
         template_file = self.skeletons_dir / f"{letter}.npy"
-        if template_file.exists():
-            tensor = np.load(template_file)
-            hand_pts = self._extract_dominant_hand(tensor)
-            self._template_cache[letter] = hand_pts
-            return hand_pts
-
-        # 2. Поиск в hybrid_tensors/train
-        train_letter_dir = Path("hybrid_tensors/train") / letter
+        candidates = [template_file] if template_file.exists() else []
+        train_letter_dir = Path(__file__).resolve().parents[2] / "hybrid_tensors" / "train" / letter
         if train_letter_dir.exists():
-            files = list(train_letter_dir.glob("*.npy"))
-            if files:
-                tensor = np.load(files[0])
-                hand_pts = self._extract_dominant_hand(tensor)
-                self._template_cache[letter] = hand_pts
-                return hand_pts
-
-        # 3. Синтетический эталон
-        pts = self._create_fallback_hand_template(letter)
-        self._template_cache[letter] = pts
-        return pts
+            candidates.extend(sorted(train_letter_dir.glob("*.npy"))[:24])
+        references = []
+        for candidate in candidates:
+            try:
+                reference = extract_active_hand(np.load(candidate, allow_pickle=False))
+                if reference is not None:
+                    references.append(reference)
+            except (OSError, ValueError):
+                continue
+        if references:
+            points = max(references, key=lambda reference: reference.quality).points
+            self._template_cache[letter] = points
+            return points
+        return None
 
     @staticmethod
     def _extract_dominant_hand(tensor_16x118: np.ndarray) -> np.ndarray:
         """Извлекает наиболее активную руку (21, 2) из среднего кадра."""
-        mid_frame = tensor_16x118[8]
-        left_h = mid_frame[34:76].reshape(21, 2)
-        right_h = mid_frame[76:118].reshape(21, 2)
-
-        if np.count_nonzero(right_h) > np.count_nonzero(left_h):
-            return right_h
-        return left_h
-
-    @staticmethod
-    def _create_fallback_hand_template(letter: str) -> np.ndarray:
-        """Базовый анатомический каркас кисти для демонстрации."""
-        base_hand = np.array([
-            [0.0, 0.0],       # 0: wrist
-            [-0.2, -0.2], [-0.35, -0.4], [-0.45, -0.55], [-0.5, -0.7],  # Thumb
-            [-0.15, -0.5], [-0.2, -0.8], [-0.22, -1.0], [-0.23, -1.2],  # Index
-            [0.0, -0.52], [0.0, -0.85], [0.0, -1.1], [0.0, -1.3],       # Middle
-            [0.15, -0.48], [0.2, -0.8], [0.22, -1.05], [0.23, -1.25],   # Ring
-            [0.3, -0.4], [0.38, -0.65], [0.42, -0.85], [0.45, -1.05]    # Pinky
-        ], dtype=np.float32)
-        return base_hand
+        reference = extract_active_hand(tensor_16x118)
+        return reference.points if reference is not None else np.zeros((21, 2), dtype=np.float32)
 
     @staticmethod
     def normalize_single_hand(hand_21x2: np.ndarray) -> np.ndarray:
@@ -99,7 +81,7 @@ class DactylEvaluator:
 
         return centered / scale
 
-    def evaluate_hand(self, live_hand_21x2: np.ndarray) -> Tuple[float, float, bool]:
+    def evaluate_hand(self, live_hand_21x2: Optional[np.ndarray]) -> Tuple[float, float, bool]:
         """
         Оценивает совпадение текущей руки с целевой буквой.
         Возвращает:
@@ -107,19 +89,30 @@ class DactylEvaluator:
         - hold_progress: float от 0.0 до 1.0 (прогресс удержания 1.5 сек)
         - is_confirmed: bool (True, если жест удержан требуемое время)
         """
-        if self._target_letter is None or np.all(live_hand_21x2 == 0):
+        now = time.monotonic()
+        if self._last_observation is not None and now - self._last_observation > 0.5:
+            self._hold_start_time = None
+        self._last_observation = now
+        if (self._target_letter is None or live_hand_21x2 is None
+                or np.shape(live_hand_21x2) != (21, 2)
+                or not np.isfinite(live_hand_21x2).all() or np.all(live_hand_21x2 == 0)):
             self._hold_start_time = None
             self._is_holding = False
             return 0.0, 0.0, False
 
         template_hand = self._get_template_hand(self._target_letter)
         if template_hand is None or np.all(template_hand == 0):
-            return 0.5, 0.0, False
+            self._hold_start_time = None
+            return 0.0, 0.0, False
 
         norm_live = self.normalize_single_hand(live_hand_21x2)
         norm_templ = self.normalize_single_hand(template_hand)
 
         # Вычисление среднего евклидова расстояния между соответствующими суставами
+        # Accept either leading hand; reflection preserves finger correspondence.
+        reflected = norm_live * np.array([-1, 1])
+        if np.mean(np.linalg.norm(reflected - norm_templ, axis=1)) < np.mean(np.linalg.norm(norm_live - norm_templ, axis=1)):
+            norm_live = reflected
         dists = np.linalg.norm(norm_live - norm_templ, axis=1)
         mean_dist = float(np.mean(dists))
 
@@ -129,7 +122,6 @@ class DactylEvaluator:
         score = float(np.clip(1.0 - (mean_dist / 1.7), 0.0, 1.0))
 
         # Оценка удержания конфигурации
-        now = time.time()
         is_confirmed = False
         hold_progress = 0.0
 

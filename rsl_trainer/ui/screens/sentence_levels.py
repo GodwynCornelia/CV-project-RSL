@@ -1,6 +1,3 @@
-from collections import deque
-import json
-from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
@@ -17,12 +14,15 @@ from PyQt6.QtWidgets import (
 )
 
 from rsl_trainer.core.audio_feedback import AudioFeedback
-from rsl_trainer.core.classifier import TargetGestureVerifier, VerificationResult
+from rsl_trainer.core.recording import GestureRecording
+from rsl_trainer.core.trajectories import find_trajectory
+from rsl_trainer.core.classifier import VerificationResult
 from rsl_trainer.cv.camera_worker import CameraWorker
 from rsl_trainer.cv.fast_tracker import TrackerMode
 from rsl_trainer.cv.ghost_overlay import GhostOverlayRenderer
 from rsl_trainer.database.db_manager import DatabaseManager
 from rsl_trainer.ui.components.video_canvas import VideoCanvas
+from rsl_trainer.ui.components.gesture_preview import GestureSilhouettePreview
 
 
 class SentenceLevelsScreen(QWidget):
@@ -39,23 +39,34 @@ class SentenceLevelsScreen(QWidget):
         self.navigator = navigator
         self.camera_worker = camera_worker
         self.db = db
-        self.audio = AudioFeedback()
+        self.audio = AudioFeedback(config=camera_worker.config)
 
-        self.verifier: Optional[TargetGestureVerifier] = None
+        self.inference = camera_worker.inference_service
+        self.inference.loaded.connect(self._on_model_loaded)
+        self.inference.verified.connect(self._on_verified)
+        self.inference.failed.connect(self._on_inference_error)
+        self._active = False
+        self._request_id = None
+        self._model_ready = False
+        self._camera_failed = False
+        camera_worker.camera_error.connect(self._on_camera_error)
         self.ghost_renderer = GhostOverlayRenderer()
 
         # Текущий уровень и фраза
         self.current_level_data: Optional[Dict] = None
         self.current_phrase: List[str] = []
         self.step_idx = 0
-        self.frame_buffer = deque(maxlen=16)
+        self.recording = GestureRecording(camera_worker.config.dynamic_recording_seconds)
 
         # Состояния тренажера
         self.state = "IDLE"
         self.countdown_val = 3
         self.countdown_timer = QTimer(self)
-        self.countdown_timer.setInterval(800)
+        self.countdown_timer.setInterval(1000)
         self.countdown_timer.timeout.connect(self._on_countdown_tick)
+        self.recording_timer = QTimer(self)
+        self.recording_timer.setSingleShot(True)
+        self.recording_timer.timeout.connect(self._evaluate_step)
 
         self._build_ui()
 
@@ -76,8 +87,11 @@ class SentenceLevelsScreen(QWidget):
         self.stack.addWidget(self.trainer_page)
 
         # 3. Финальный экран поздравления
-        self.complete_page = QWidget(self)
-        self._build_complete_page(self.complete_page)
+        self.complete_page = QScrollArea(self)
+        self.complete_page.setWidgetResizable(True)
+        complete_content = QWidget()
+        self._build_complete_page(complete_content)
+        self.complete_page.setWidget(complete_content)
         self.stack.addWidget(self.complete_page)
 
         main_layout.addWidget(self.stack)
@@ -228,8 +242,8 @@ class SentenceLevelsScreen(QWidget):
     # -------------------------------------------------------------
     def _build_trainer_page(self, page: QWidget) -> None:
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(28, 16, 28, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 8, 28, 8)
+        layout.setSpacing(6)
 
         # Верхняя панель
         header = QHBoxLayout()
@@ -239,11 +253,13 @@ class SentenceLevelsScreen(QWidget):
         header.addWidget(btn_back)
 
         self.cur_lvl_title = QLabel("УРОВЕНЬ 1", page)
+        self.cur_lvl_title.setWordWrap(True)
         self.cur_lvl_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #10b981;")
         header.addWidget(self.cur_lvl_title)
         header.addStretch()
 
         self.phrase_status = QLabel("Покажите активный жест", page)
+        self.phrase_status.setWordWrap(True)
         self.phrase_status.setStyleSheet(
             "background-color: #1e293b; color: #fbbf24; border: 1.5px solid #d97706; "
             "border-radius: 8px; padding: 6px 14px; font-weight: bold; font-size: 13px;"
@@ -262,7 +278,11 @@ class SentenceLevelsScreen(QWidget):
 
         # Видео холст
         self.video_canvas = VideoCanvas(page)
+        self.video_canvas.setMinimumHeight(180)
         layout.addWidget(self.video_canvas, stretch=1)
+        self.preview_widget = GestureSilhouettePreview(page, config=self.camera_worker.config)
+        self.preview_widget.setFixedHeight(220)
+        layout.addWidget(self.preview_widget)
 
         # Нижняя контрольная плашка
         b_bar = QFrame(page)
@@ -280,6 +300,7 @@ class SentenceLevelsScreen(QWidget):
         bb_layout.addWidget(self.phrase_buffer_bar)
 
         self.phrase_hint = QLabel("Нажмите «Старт» для отсчета 3-2-1", b_bar)
+        self.phrase_hint.setWordWrap(True)
         self.phrase_hint.setStyleSheet("color: #8fa3bf; font-size: 13px;")
         bb_layout.addWidget(self.phrase_hint)
         bb_layout.addStretch()
@@ -347,29 +368,35 @@ class SentenceLevelsScreen(QWidget):
         self._refresh_levels_tree()
 
     def on_leave(self) -> None:
+        self._active = False
+        self._request_id = None
         self.countdown_timer.stop()
+        self.recording_timer.stop()
+        self.preview_widget.finish_recording()
+        self.preview_widget.stop_animation()
         try:
             self.camera_worker.frame_ready.disconnect(self._on_frame_ready)
         except Exception:
             pass
+        self.camera_worker.stop()
 
     def _start_level(self, level_dict: Dict) -> None:
+        self.on_leave()
+        self._active = True
+        self._camera_failed = False
+        self.recording.duration = self.camera_worker.config.dynamic_recording_seconds
         self.current_level_data = level_dict
         self.current_phrase = list(level_dict["target_phrase"])
         self.step_idx = 0
         self.state = "IDLE"
-        self.frame_buffer.clear()
+        self.recording.start()
         self.phrase_buffer_bar.setValue(0)
 
         self.cur_lvl_title.setText(level_dict["title"].upper())
         self._render_phrase_chips()
 
-        if self.verifier is None:
-            self.phrase_hint.setText("Загрузка нейросети...")
-            try:
-                self.verifier = TargetGestureVerifier()
-            except Exception as e:
-                self.phrase_hint.setText(f"Ошибка загрузки: {e}")
+        self._model_ready = False
+        self._request_id = self.inference.load()
 
         self.stack.setCurrentIndex(1)
 
@@ -379,6 +406,7 @@ class SentenceLevelsScreen(QWidget):
             self.camera_worker.start()
 
         self._setup_step()
+        self.phrase_hint.setText("Загрузка нейросети...")
 
     def _back_to_tree(self) -> None:
         self.on_leave()
@@ -431,6 +459,8 @@ class SentenceLevelsScreen(QWidget):
             return
 
         current_target = self.current_phrase[self.step_idx]
+        self.template_trajectory = find_trajectory(current_target, self.camera_worker.config)
+        self.preview_widget.set_trajectory(self.template_trajectory)
         self._render_phrase_chips()
         self.phrase_status.setText(f"Шаг {self.step_idx + 1}/{len(self.current_phrase)}: покажите «{current_target}»")
         self.phrase_status.setStyleSheet(
@@ -438,12 +468,12 @@ class SentenceLevelsScreen(QWidget):
             "border-radius: 8px; padding: 6px 14px; font-weight: bold; font-size: 13px;"
         )
         self.btn_phrase_action.setText("▶ Записать жест (3-2-1)")
-        self.btn_phrase_action.setEnabled(True)
+        self.btn_phrase_action.setEnabled(self._model_ready)
         self.phrase_hint.setText(f"Приготовьтесь показать жест «{current_target}»")
         self.state = "IDLE"
 
     def _toggle_recording(self) -> None:
-        if self.state in ("COUNTDOWN", "RECORDING"):
+        if not self._active or not self._model_ready or self._camera_failed or self.state in ("COUNTDOWN", "RECORDING", "EVALUATING"):
             return
 
         self.state = "COUNTDOWN"
@@ -464,7 +494,11 @@ class SentenceLevelsScreen(QWidget):
 
     def _start_recording(self) -> None:
         self.state = "RECORDING"
-        self.frame_buffer.clear()
+        self.recording.start()
+        self.phrase_buffer_bar.setValue(0)
+        self.recording_timer.start(round(self.recording.duration * 1000))
+        self.preview_widget.begin_recording(self.recording.duration)
+        self.phrase_hint.setText(f"Выполните жест целиком за {self.recording.duration:g} сек")
         self.phrase_status.setText("🔴 ИДЕТ ЗАПИСЬ ЖЕСТА...")
         self.phrase_status.setStyleSheet(
             "background-color: #450a0a; color: #f87171; border: 1.5px solid #ef4444; "
@@ -472,33 +506,74 @@ class SentenceLevelsScreen(QWidget):
         )
 
     def _on_frame_ready(self, frame_bgr: np.ndarray, features_118: np.ndarray, primary_hand: Optional[np.ndarray]) -> None:
-        if self.stack.currentIndex() != 1:
+        if not self._active or self.stack.currentIndex() != 1:
             return
+        if self._camera_failed:
+            self._camera_failed = False
+            self.btn_phrase_action.setEnabled(self._model_ready)
+            self.phrase_hint.setText("Камера подключена. Начните новую запись.")
 
         if self.state == "RECORDING":
-            self.frame_buffer.append(features_118.copy())
-            self.phrase_buffer_bar.setValue(len(self.frame_buffer))
-
-            if len(self.frame_buffer) >= 16:
-                self._evaluate_step()
+            self.recording.append(features_118)
+            self.phrase_buffer_bar.setValue(round(self.recording.progress() * 16))
 
         frame_with_box, _ = self.ghost_renderer.draw_calibration_box(frame_bgr)
         self.video_canvas.update_frame(frame_with_box)
 
     def _evaluate_step(self) -> None:
+        if not self._active or self.state != "RECORDING":
+            return
         self.state = "EVALUATING"
+        self.preview_widget.finish_recording()
         target_word = self.current_phrase[self.step_idx]
-        raw_16 = np.array(list(self.frame_buffer))
-
-        if self.verifier is None:
-            self.phrase_hint.setText("Модель не загружена")
+        try:
+            raw_16 = self.recording.sample()
+        except ValueError as exc:
+            self.phrase_hint.setText(str(exc))
             self.state = "IDLE"
             self.btn_phrase_action.setEnabled(True)
             return
+        self.phrase_buffer_bar.setValue(16)
+        self.phrase_status.setText("Проверяем жест...")
+        self._request_id = self.inference.verify(raw_16, target_word)
 
-        res: VerificationResult = self.verifier.verify_target(raw_16, target_word)
+    def _on_model_loaded(self, request_id):
+        if not self._active or request_id != self._request_id:
+            return
+        self._model_ready = True
+        self.btn_phrase_action.setEnabled(not self._camera_failed)
+        if not self._camera_failed:
+            self.phrase_hint.setText(f"Выполните жест целиком за {self.recording.duration:g} сек после отсчёта")
+
+    def _on_camera_error(self, message):
+        if not self._active:
+            return
+        self._camera_failed = True
+        self.preview_widget.finish_recording()
+        self.countdown_timer.stop()
+        self.recording_timer.stop()
+        if self.state == "EVALUATING":
+            self._request_id = None
+        self.state = "IDLE"
+        self.btn_phrase_action.setEnabled(False)
+        self.phrase_status.setText("Камера недоступна")
+        self.phrase_hint.setText(f"{message}. Переподключите камеру и повторите запись.")
+        self.video_canvas.set_placeholder_text("Камера недоступна")
+
+    def _on_inference_error(self, request_id, message):
+        if not self._active or request_id != self._request_id:
+            return
+        self.state = "IDLE"
+        self.phrase_hint.setText(f"Ошибка распознавания: {message}")
+        self.btn_phrase_action.setEnabled(self._model_ready and not self._camera_failed)
+
+    def _on_verified(self, request_id, res: VerificationResult) -> None:
+        if not self._active or request_id != self._request_id or self.state != "EVALUATING":
+            return
+        self._request_id = None
 
         if res.is_passed:
+            self.db.update_gesture_progress(self.current_phrase[self.step_idx], res.target_confidence, is_passed=True)
             self.audio.play_success()
             self.step_idx += 1
             if self.step_idx >= len(self.current_phrase):

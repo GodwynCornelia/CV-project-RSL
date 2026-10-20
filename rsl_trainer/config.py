@@ -30,6 +30,8 @@ class AppConfig:
 
     # Параметры валидатора динамических жестов (Target-Constrained Verifier)
     dynamic_window_size: int = 16     # Спецификация 16 кадров
+    dynamic_recording_seconds: float = 2.0  # Полное движение, затем выборка 16 фаз
+    demonstration_speed: float = 0.5  # Скорость изучения, независимо от записи
     dynamic_top_k: int = 3            # Top-3 проверка
     dynamic_confidence_threshold: float = 0.30  # P(target) >= 0.30
 

@@ -49,6 +49,7 @@ class FastTracker:
     def __init__(self, config: Optional[AppConfig] = None):
         self.config = config or AppConfig()
         self.mode = TrackerMode.DACTYL
+        self._primary_side = None
 
         self.yolo_model: Optional[YOLO] = None
         self.hand_landmarker: Optional[HandLandmarker] = None
@@ -67,11 +68,17 @@ class FastTracker:
                 num_hands=2
             )
             self.hand_landmarker = HandLandmarker.create_from_options(options)
+        else:
+            raise FileNotFoundError(f"Модель кистей не найдена: {mp_path}")
 
         # 2. Инициализация YOLOv8-pose
-        yolo_path = Path(self.config.yolo_pose_path)
-        if yolo_path.exists():
-            self.yolo_model = YOLO(str(yolo_path))
+        # YOLO is loaded lazily in dynamic mode inside the capture thread.
+
+    def close(self) -> None:
+        if self.hand_landmarker is not None:
+            self.hand_landmarker.close()
+            self.hand_landmarker = None
+        self.yolo_model = None
 
     def set_mode(self, mode: TrackerMode) -> None:
         """Переключает режим трекинга (DACTYL / DYNAMIC)."""
@@ -87,6 +94,12 @@ class FastTracker:
         """
         orig_h, orig_w, _ = frame_bgr.shape
         body_kp = np.zeros((17, 2), dtype=np.float32)
+
+        if self.mode == TrackerMode.DYNAMIC and self.yolo_model is None:
+            path = Path(self.config.yolo_pose_path)
+            if not path.exists():
+                raise FileNotFoundError(f"Модель позы не найдена: {path}")
+            self.yolo_model = YOLO(str(path))
 
         # 1. YOLOv8-pose (ТОЛЬКО в динамическом режиме для экономии CPU)
         if self.mode == TrackerMode.DYNAMIC and self.yolo_model is not None:
@@ -125,11 +138,19 @@ class FastTracker:
                         right_hand_pts = coords
 
         # Определение ведущей руки
-        if np.count_nonzero(right_hand_pts) > 0:
-            primary_hand = right_hand_pts
-        elif np.count_nonzero(left_hand_pts) > 0:
-            primary_hand = left_hand_pts
+        left_visible, right_visible = np.any(left_hand_pts != 0), np.any(right_hand_pts != 0)
+        if left_visible and right_visible:
+            # The raised hand signs; keep the previous choice when heights are close.
+            side = 0 if left_hand_pts[0, 1] < right_hand_pts[0, 1] else 1
+            if abs(left_hand_pts[0, 1] - right_hand_pts[0, 1]) < orig_h * 0.08:
+                side = getattr(self, "_primary_side", None) if getattr(self, "_primary_side", None) is not None else side
+            self._primary_side = side
+            primary_hand = left_hand_pts if side == 0 else right_hand_pts
+        elif left_visible or right_visible:
+            self._primary_side = 0 if left_visible else 1
+            primary_hand = left_hand_pts if left_visible else right_hand_pts
         else:
+            self._primary_side = None
             primary_hand = None
 
         # Сборка 118 признаков

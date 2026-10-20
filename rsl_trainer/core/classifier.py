@@ -83,8 +83,17 @@ class TargetGestureVerifier:
         Проверка выполнения конкретного целевого жеста.
         Target in Top-K и P(Target) >= threshold.
         """
-        k = top_k or self.config.dynamic_top_k
-        thresh = threshold or self.config.dynamic_confidence_threshold
+        k = self.config.dynamic_top_k if top_k is None else top_k
+        thresh = self.config.dynamic_confidence_threshold if threshold is None else threshold
+        raw_16x118 = np.asarray(raw_16x118)
+        if raw_16x118.shape != (16, 118):
+            raise ValueError(f"Ожидалась форма (16, 118), получена: {raw_16x118.shape}")
+        if k < 1 or not 0 <= thresh <= 1:
+            raise ValueError("Некорректный порог или количество классов")
+        if not any(name.casefold().strip() == target_name.casefold().strip() for name in self.label2id):
+            raise ValueError(f"Жест «{target_name}» отсутствует в словаре модели")
+        if not np.isfinite(raw_16x118).all() or not np.any(raw_16x118[:, 34:] != 0):
+            raise ValueError("Кисти не обнаружены. Покажите жест перед камерой.")
 
         preds = self.predict_top_k(raw_16x118, top_k=max(k, 10))
 

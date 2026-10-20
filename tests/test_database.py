@@ -80,3 +80,27 @@ def test_levels_and_completion(temp_db):
     assert levels_after[0]["stars"] == 3
     # Уровень 2 должен быть разблокирован
     assert levels_after[1]["is_unlocked"] == 1
+
+
+@pytest.mark.parametrize("days_ago,expected", [(1, 5), (3, 1), (0, 4)])
+def test_reward_does_not_erase_previous_activity_date(temp_db, days_ago, expected):
+    import datetime
+    previous = (datetime.date.today() - datetime.timedelta(days=days_ago)).isoformat()
+    with temp_db._get_connection() as conn:
+        conn.execute("UPDATE users SET last_active_date = ?, streak_days = 4", (previous,))
+    temp_db.add_xp(25)
+    assert temp_db.update_streak() == expected
+    # Multiple successful exercises on one day must not increment it again.
+    temp_db.add_xp(30)
+    assert temp_db.update_streak() == expected
+
+
+def test_mastery_uses_verification_result_and_survives_later_failure(temp_db):
+    temp_db.update_gesture_progress("вода", 0.31, is_passed=True)
+    assert temp_db.get_gesture_progress("вода")["status"] == "mastered"
+    temp_db.update_gesture_progress("вода", 0.10, is_passed=False)
+    progress = temp_db.get_gesture_progress("вода")
+    assert progress["status"] == "mastered"
+    assert progress["best_score"] == 0.31
+    temp_db.update_gesture_progress("дом", 0.65, is_passed=False)
+    assert temp_db.get_gesture_progress("дом")["status"] == "learning"

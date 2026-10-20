@@ -181,11 +181,10 @@ class DatabaseManager:
 
     def add_xp(self, amount: int) -> int:
         """Добавляет очки опыта пользователю и обновляет активность."""
-        today = datetime.date.today().isoformat()
         with self._get_connection() as conn:
             conn.execute(
-                "UPDATE users SET total_xp = total_xp + ?, last_active_date = ? WHERE user_id = 1",
-                (amount, today)
+                "UPDATE users SET total_xp = total_xp + ? WHERE user_id = 1",
+                (amount,)
             )
             conn.commit()
             return self.get_user_stats()["total_xp"]
@@ -263,19 +262,19 @@ class DatabaseManager:
                 return dict(row)
             return {"gesture_id": gesture_name, "status": "learning", "best_score": 0.0, "last_trained": ""}
 
-    def update_gesture_progress(self, gesture_name: str, score: float) -> None:
+    def update_gesture_progress(self, gesture_name: str, score: float, *, is_passed: bool = False) -> None:
         today = datetime.date.today().isoformat()
         with self._get_connection() as conn:
             row = conn.execute("SELECT * FROM gesture_progress WHERE gesture_id = ?", (gesture_name,)).fetchone()
             if row:
                 best = max(row["best_score"], score)
-                status = "mastered" if best >= 0.60 else "learning"
+                status = "mastered" if is_passed or row["status"] == "mastered" else "learning"
                 conn.execute(
                     "UPDATE gesture_progress SET status = ?, best_score = ?, last_trained = ? WHERE gesture_id = ?",
                     (status, best, today, gesture_name)
                 )
             else:
-                status = "mastered" if score >= 0.60 else "learning"
+                status = "mastered" if is_passed else "learning"
                 conn.execute(
                     "INSERT INTO gesture_progress (gesture_id, status, best_score, last_trained) VALUES (?, ?, ?, ?)",
                     (gesture_name, status, score, today)
